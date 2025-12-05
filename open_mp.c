@@ -23,68 +23,31 @@ double daily_return(double prev_close, double curr_close) {
     return (curr_close - prev_close) / prev_close;
 }
 
-// compute_volatility : calculate the standard deviation of the daily returns (volatility).
-// In this function we use OpenMP "reduction" to parallelize the loops that compute
-double compute_volatility(double *returns, int n) {
-    if (n <= 1) return 0.0;
-
-    double sum = 0.0;
-
-    // compute the mean of the returns.
-    #pragma omp parallel for reduction(+:sum)
-    for (int i = 0; i < n; i++) {
-        sum += returns[i];
-    }
-
-    double mean = sum / n;
-    double variance = 0.0;
-
-    // compute the variance 
-    // variance, so we use another reduction.
-    #pragma omp parallel for reduction(+:variance)
-    for (int i = 0; i < n; i++) {
-        double diff = returns[i] - mean;
-        variance += diff * diff;
-    }
-
-    return sqrt(variance / n);
-}
-
 int read_csv(const char *filename, StockData *data, int max_days) {
     FILE *file = fopen(filename, "r");
-    if (!file) {
-        perror("Error opening file");
-        return 0;
-    }
+    if (!file) return 0;
 
     char line[MAX_LINE_LEN];
     int count = 0;
-
-    fgets(line, sizeof(line), file);
+    fgets(line, sizeof(line), file); // Skip Header
 
     while (fgets(line, sizeof(line), file) && count < max_days) {
-        // Format: Date,Open,High,Low,Close,Volume
-        sscanf(line, "%[^,],%lf,%lf,%lf,%lf,%lf",
-               data[count].date, &data[count].open, &data[count].high,
-               &data[count].low, &data[count].close, &data[count].volume);
-        count++;
+        if (sscanf(line, "%19[^,],%lf,%lf,%lf,%lf,%lf",
+                   data[count].date, &data[count].open, &data[count].high,
+                   &data[count].low, &data[count].close, &data[count].volume) == 6) {
+            count++;
+        }
     }
-
     fclose(file);
     return count;
 }
 
 int main(int argc, char *argv[]) {
 
-    if (argc < 2) {
-        printf("Usage: %s [max_days] <file1.csv> <file2.csv> ... <fileN.csv>\n", argv[0]);
-        return 1;
-    }
-
     int max_days = MAX_DAYS;
     int file_start_index = 1;
 
-    if (argc >= 3) {
+    if (argc >= 2) {
         char *endptr;
         long tmp = strtol(argv[1], &endptr, 10);
         if (*endptr == '\0' && tmp > 0) {
@@ -93,56 +56,52 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    if (argc <= file_start_index) {
-        printf("Usage: %s [max_days] <file1.csv> <file2.csv> ... <fileN.csv>\n", argv[0]);
-        return 1;
-    }
-
     printf("\nAnalysis result of stock files (OpenMP version)\n");
     printf("===========================================\n\n");
 
-    for (int f = file_start_index; f < argc; f++) {
+    for (int f = file_index; f < argc; f++) {
         const char *filename = argv[f];
-
         StockData *data = malloc(sizeof(StockData) * max_days);
-        double *returns = malloc(sizeof(double) * max_days);
-        if (!data || !returns) {
-            printf("Memory allocation failed for file: %s\n", filename);
-            free(data);
-            free(returns);
-            continue;
-        }
-
+        
+       
         int n = read_csv(filename, data, max_days);
         if (n <= 1) {
             printf("Not enough data in file: %s\n", filename);
             free(data);
-            free(returns);
             continue;
         }
 
-        // symbol name
-        char symbol[32];
-        strcpy(symbol, filename);
-        char *dot = strchr(symbol, '.');
-        if (dot) *dot = '\0';
+        double start = omp_get_wtime();
 
-        double start_time = omp_get_wtime();
+        double avg_sum = 0.0;
+        double sum_ret = 0.0;
+        double sum_ret_sq = 0.0;
 
-        double avg_sum = 0.0; // to calculate the cumulative daily average
-
-        #pragma omp parallel for reduction(+:avg_sum)
-        for (int i = 0; i < n; i++) {
-            avg_sum += daily_average(data[i]);
-
-            if (i > 0) {
-                returns[i - 1] = daily_return(data[i - 1].close, data[i].close);
+        // We use one parallel region to avoid starting/stopping threads multiple times.
+        #pragma omp parallel default(none) \
+                shared(n, data, avg_sum, sum_ret, sum_ret_sq)
+        {
+            #pragma omp for reduction(+:global_sum_avg)
+            for (int i = 0; i < n; i++) {
+                avg_sum += daily_average(data[i]);
             }
-        }
 
-        double overall_avg = avg_sum / n;
+            #pragma omp for reduction(+:sum_ret, sum_ret_sq)
+            for (int i = 0; i < n - 1; i++) {
+                double r = daily_return(data[i].close, data[i+1].close);
+                sum_ret += r;
+                sum_ret_sq += r * r;
+            }
+        } 
+ 
+        // calculate the standard deviation of the daily returns (volatility).
+        double avg_price = avg_sum / n;
+        double mean_ret = sum_ret / (n - 1);
+        double mean_sq = sum_ret_sq / (n - 1);
+        double variance = mean_sq - (mean_ret * mean_ret);
+        if (variance < 0) variance = 0;
+        double volatility = sqrt(variance);
 
-        double volatility = compute_volatility(returns, n - 1);
 
         double end_time = omp_get_wtime();
         double elapsed = end_time - start_time;
@@ -156,7 +115,6 @@ int main(int argc, char *argv[]) {
         printf("---------------------------------------------\n");
 
         free(data);
-        free(returns);
     }
 
     return 0;
