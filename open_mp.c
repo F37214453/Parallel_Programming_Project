@@ -59,7 +59,7 @@ int main(int argc, char *argv[]) {
     printf("\nAnalysis result of stock files (OpenMP version)\n");
     printf("===========================================\n\n");
 
-    for (int f = file_index; f < argc; f++) {
+    for (int f = file_start_index; f < argc; f++) {
         const char *filename = argv[f];
         StockData *data = malloc(sizeof(StockData) * max_days);
         
@@ -71,7 +71,7 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        double start = omp_get_wtime();
+        double start_time = omp_get_wtime();
 
         double avg_sum = 0.0;
         double sum_ret = 0.0;
@@ -81,7 +81,7 @@ int main(int argc, char *argv[]) {
         #pragma omp parallel default(none) \
                 shared(n, data, avg_sum, sum_ret, sum_ret_sq)
         {
-            #pragma omp for reduction(+:global_sum_avg)
+            #pragma omp for reduction(+:avg_sum)
             for (int i = 0; i < n; i++) {
                 avg_sum += daily_average(data[i]);
             }
@@ -106,9 +106,9 @@ int main(int argc, char *argv[]) {
         double end_time = omp_get_wtime();
         double elapsed = end_time - start_time;
 
-        printf("Symbol: %s\n", symbol);
+        printf("Symbol: %s\n", filename);
         printf("Records loaded: %d\n", n);
-        printf("Average daily price (USD): %.4f\n", overall_avg);
+        printf("Average daily price (USD): %.4f\n", avg_price);
         printf("Volatility (std. dev of returns): %.6f\n", volatility);
         printf("Volatility (percentage): %.4f%%\n", volatility * 100);
         printf("Execution time (computation only): %.6f seconds\n", elapsed);

@@ -95,7 +95,7 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    if (argc <= file_start_index) {
+    if (file_start_index >= argc) {
         printf("Usage: %s [max_days] <file1.csv> <file2.csv> ... <fileN.csv>\n", argv[0]);
         return 1;
     }
@@ -135,26 +135,28 @@ int main(int argc, char *argv[]) {
             total_sum_ret += r;
             total_sum_ret_sq += r * r; 
         }
-        
-        double avg_price = avg_sum / (double)n;
-
-        double mean_ret = total_sum_ret / (double)num_returns;
-        double mean_sq = total_sum_ret_sq / (double)num_returns;
-
-        double variance = mean_sq - (mean_ret * mean_ret);
-        if (variance < 0) variance = 0;
-        double volatility = sqrt(variance);
 
         double end_time = omp_get_wtime();
         double elapsed = end_time - start_time;
 
-        printf("Symbol: %s\n", symbol);
-        printf("Records loaded: %d\n", n);
-        printf("Average daily price (USD): %.4f\n", overall_avg);
-        printf("Volatility (std. dev of returns): %.6f\n", volatility);
+        double avg_price = avg_sum / (double)n;
+
+        double mean_ret = total_sum_ret / (double)num_returns;
+        double mean_sq  = total_sum_ret_sq / (double)num_returns;
+        
+        // Variance = E[x^2] - (E[x])^2
+        double variance = mean_sq - (mean_ret * mean_ret);
+        if (variance < 0) variance = 0;
+        double volatility = sqrt(variance);
+
+        
+        printf("File: %s\n", filename);
+        printf("Days loaded: %d\n", n);
+        printf("Average price: %.4f\n", avg_price);
+        printf("Volatility: %.6f\n", volatility);
         printf("Volatility (percentage): %.4f%%\n", volatility * 100);
-        printf("Execution time (computation only): %.6f seconds\n", elapsed);
-        printf("---------------------------------------------\n");
+        printf("Serial time:   %.6f seconds\n", elapsed);
+        printf("-------------------------------------------\n");
 
         free(data);
     }
