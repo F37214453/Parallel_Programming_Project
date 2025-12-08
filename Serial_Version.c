@@ -1,165 +1,296 @@
-/***************************************************************
- * File: stock_analysis_serial.c
- * Project: Stock Market Analysis (Serial Version)
- *
- * Description:
- * This program analyzes stock price data by computing:
- *    - Daily average price
- *    - Daily returns (percentage change)
- *    - Price volatility (standard deviation of returns)
- *
- * The serial version is a baseline.
- *
- * Input:
- *    One or more CSV files, each containing:
- *      Date, Open, High, Low, Close, Volume
- *    Optionally, a maximum number of days [max_days] can be provided.
- *
- * Output:
- *    - Number of records loaded
- *    - Average daily price
- *    - Volatility (std. deviation)
- *    - Execution time (computation only)
- ****************************************************************/
-
 #include <stdio.h>
-#include <stdlib.h> // for malloc, free
+#include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <omp.h>
+#include <dirent.h>
 
-#define MAX_LINE_LEN 256  // max line length
-#define MAX_DAYS     1000 // default max number of days to read
+#define MAX_LINE_LEN 256
 
+// logical price for cleaning the data
+#define MIN_PRICE 0.01
+#define MAX_PRICE 10000.0
+
+// Allowed range for the years to be wide and safe
+#define MIN_YEAR_GLOBAL 1900
+#define MAX_YEAR_GLOBAL 2100
+#define MAX_DECADES (((MAX_YEAR_GLOBAL - MIN_YEAR_GLOBAL) / 10) + 1)
+
+// data structure representing one row of stock data
 typedef struct {
-    char date[20]; // we put 20 because most date formats fit within this length
-    double open, high, low, close, volume; // Price and volume columns
+    char date[20];
+    double open, high, low, close, volume;
 } StockData;
 
-// daily_average : summary for daily price
-double daily_average(StockData s) {
-    return (s.open + s.high + s.low + s.close) / 4.0;
+// compute daily avg price from OHLC
+double daily_average(const StockData *s) {
+    return (s->open + s->high + s->low + s->close) / 4.0;
 }
 
-// daily_return: explains the change between the previous day's close
-// and the current day's close (important for stock movement analysis)
-double daily_return(double prev_close, double curr_close) {
-    if (prev_close == 0.0) return 0.0;
-    return (curr_close - prev_close) / prev_close;
+// compute daily returns (curr - prev) / prev
+// Protect to not divied by zero 
+double daily_return(double prev, double curr) {
+    if (prev == 0.0) return 0.0;
+    return (curr - prev) / prev;
 }
 
-// to read the file
-int read_csv(const char *filename, StockData *data, int max_days) {
+// Read the data form the CSV files to insert it to the dynamic array of StocksData
+// Returns number of rows; set *data_out
+// expected CSV format
+// data we read is open, high, low, close, adj_close, volume
+int read_csv(const char *filename, StockData **data_out) {
     FILE *file = fopen(filename, "r");
     if (!file) {
-        perror("Error opening file");
+        fprintf(stderr, "Cannot open file: %s\n", filename);
+        *data_out = NULL;
         return 0;
     }
 
     char line[MAX_LINE_LEN];
-    int count = 0;
+    int count = 0, capacity = 0;
+    StockData *data = NULL;
 
-    // skips the title
+    // skip header
     fgets(line, sizeof(line), file);
 
-    while (fgets(line, sizeof(line), file) && count < max_days) {
-        // Format: Date,Open,High,Low,Close,Volume
-        if (sscanf(line, "%19[^,],%lf,%lf,%lf,%lf,%lf",
-                  data[count].date,
-                  &data[count].open,
-                  &data[count].high,
-                  &data[count].low,
-                  &data[count].close,
-                  &data[count].volume) == 6)
-        {
+    while (fgets(line, sizeof(line), file)) {
+        // scaling if needed(Grow array )
+        if (count >= capacity) {
+            int new_cap = (capacity == 0) ? 1024 : capacity * 2;
+            StockData *tmp = realloc(data, new_cap * sizeof(StockData));
+            if (!tmp) {
+                fprintf(stderr, "Memory allocation failed\n");
+                free(data);
+                fclose(file);
+                *data_out = NULL;
+                return 0;
+            }
+            data = tmp;
+            capacity = new_cap;
+        }
+
+        double adj_temp;
+        
+        // read all 7 fields
+        int parsed = sscanf(
+            line,
+            "%19[^,],%lf,%lf,%lf,%lf,%lf,%lf",
+            data[count].date,
+            &data[count].open,
+            &data[count].high,
+            &data[count].low,
+            &data[count].close,
+            &adj_temp,
+            &data[count].volume
+        );
+
+        if (parsed == 7) {
             count++;
         }
     }
 
     fclose(file);
+    *data_out = data;
     return count;
 }
 
+// cleans data, groups statistics by decade, price results 
 int main(int argc, char *argv[]) {
-    
-    int max_days = MAX_DAYS;
-    int file_start_index = 1;
 
-    
-    if (argc >= 2) {
-        char *endptr;
-        long tmp = strtol(argv[1], &endptr, 10);
-        if (*endptr == '\0' && tmp > 0) {
-            max_days = (int)tmp;
-            file_start_index = 2;
-        }
-    }
-
-    if (file_start_index >= argc) {
-        printf("Usage: %s [max_days] <file1.csv> <file2.csv> ... <fileN.csv>\n", argv[0]);
+    double total_time_exe = 0.0;
+    double start;
+    double end;
+    if (argc != 2) {
+        printf("Usage: %s <stocks_directory>\n", argv[0]);
         return 1;
     }
 
-    printf("\nAnalysis result of stock filess\n", argc - file_start_index);
-    printf("===========================================\n\n");
+    const char *dirpath = argv[1];
+    DIR *dir = opendir(dirpath);
+    if (!dir) {
+        fprintf(stderr, "Cannot open directory: %s\n", dirpath);
+        return 1;
+    }
 
-    for (int f = file_start_index; f < argc; f++) {
-        const char *filename = argv[f];
+    printf("\nSerial Stock Analysis - Market Metrics by Decade (Cleaned)\n");
+    printf("Directory: %s\n", dirpath);
+    printf("============================================================\n\n");
 
-        StockData *data = malloc(sizeof(StockData) * max_days);
-        if (!data) {
-            perror("Memory allocation failed");
+    struct dirent *entry;
+    char filepath[1024];
+
+  // Accumulators per decade 
+    double sum_avg_decade[MAX_DECADES]    = {0.0};
+    long   count_rows_decade[MAX_DECADES] = {0};
+
+    double sum_ret_decade[MAX_DECADES]    = {0.0};
+    double sum_ret_sq_decade[MAX_DECADES] = {0.0};
+    long   count_ret_decade[MAX_DECADES]  = {0};
+
+    int global_min_year = 9999;
+    int global_max_year = 0;
+
+
+    // Iterate through files
+    while ((entry = readdir(dir)) != NULL) {
+
+        const char *name = entry->d_name;
+
+        // ingro the file that has '..'
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+            continue;
+
+        // take only the file with  .csv
+        size_t len = strlen(name);
+        if (len < 4 || strcmp(name + len - 4, ".csv") != 0)
+            continue;
+
+        snprintf(filepath, sizeof(filepath), "%s/%s", dirpath, name);
+
+        StockData *data = NULL;
+        int n = read_csv(filepath, &data);
+        if (n <= 1 || !data) {
+            if (data) free(data);
             continue;
         }
 
-        int n = read_csv(filename, data, max_days);
-        if (n <= 1) {
-            printf("File: %s Not enough data in file  rows=%d\n", filename, n);
-            free(data);
-            continue;
-        }
+        start = omp_get_wtime();
 
-        double start_time = omp_get_wtime();
-
-        double avg_sum = 0.0; // to calculate the cumulative daily average
+        // track min & max year in data
         for (int i = 0; i < n; i++) {
-            avg_sum += daily_average(data[i]);
-        }
-        
-        int num_returns = n - 1;
-        double total_sum_ret = 0.0;
-        double total_sum_ret_sq = 0.0;
-
-        for (int i = 0; i < num_returns; i++){
-            double r = daily_return(data[i].close, data[i+1].close);
-            total_sum_ret += r;
-            total_sum_ret_sq += r * r; 
+            int year = 0;
+            sscanf(data[i].date, "%d", &year);
+            if (year < global_min_year) global_min_year = year;
+            if (year > global_max_year) global_max_year = year;
         }
 
-        double end_time = omp_get_wtime();
-        double elapsed = end_time - start_time;
+        // collective daily average prices per decade
+        for (int i = 0; i < n; i++) {
+            double o = data[i].open;
+            double h = data[i].high;
+            double l = data[i].low;
+            double c = data[i].close;
 
-        double avg_price = avg_sum / (double)n;
+            int year = 0;
+            sscanf(data[i].date, "%d", &year);
 
-        double mean_ret = total_sum_ret / (double)num_returns;
-        double mean_sq  = total_sum_ret_sq / (double)num_returns;
-        
-        // Variance = E[x^2] - (E[x])^2
-        double variance = mean_sq - (mean_ret * mean_ret);
-        if (variance < 0) variance = 0;
-        double volatility = sqrt(variance);
+            if (year < MIN_YEAR_GLOBAL || year > MAX_YEAR_GLOBAL)
+                continue;
 
-        
-        printf("File: %s\n", filename);
-        printf("Days loaded: %d\n", n);
-        printf("Average price: %.4f\n", avg_price);
-        printf("Volatility: %.6f\n", volatility);
-        printf("Volatility (percentage): %.4f%%\n", volatility * 100);
-        printf("Serial time:   %.6f seconds\n", elapsed);
-        printf("-------------------------------------------\n");
+            int decade_index = (year - MIN_YEAR_GLOBAL) / 10;
+            if (decade_index < 0 || decade_index >= MAX_DECADES)
+                continue;
 
+            //Clean unrealistic prices
+            if (o >= MIN_PRICE && o <= MAX_PRICE &&
+                h >= MIN_PRICE && h <= MAX_PRICE &&
+                l >= MIN_PRICE && l <= MAX_PRICE &&
+                c >= MIN_PRICE && c <= MAX_PRICE)
+            {
+                double avg = (o + h + l + c) / 4.0;
+                sum_avg_decade[decade_index]    += avg;
+                count_rows_decade[decade_index] += 1;
+            }
+        }
+
+        // collective daily returns prices per decade
+        for (int i = 0; i < n - 1; i++) {
+            double p = data[i].close;
+            double q = data[i + 1].close;
+
+            int year = 0;
+            sscanf(data[i].date, "%d", &year);
+
+            if (year < MIN_YEAR_GLOBAL || year > MAX_YEAR_GLOBAL)
+                continue;
+
+            int decade_index = (year - MIN_YEAR_GLOBAL) / 10;
+            if (decade_index < 0 || decade_index >= MAX_DECADES)
+                continue;
+
+            if (p >= MIN_PRICE && p <= MAX_PRICE &&
+                q >= MIN_PRICE && q <= MAX_PRICE &&
+                p != 0.0)
+            {
+                double r = (q - p) / p;
+
+                // exclude extreme outliers (> 100 daily move)
+                if (fabs(r) > 1.0)
+                    continue;
+
+                sum_ret_decade[decade_index]    += r;
+                sum_ret_sq_decade[decade_index] += r * r;
+                count_ret_decade[decade_index]  += 1;
+            }
+        }
+        end = omp_get_wtime();
+
+        // total computiation time 
+        total_time_exe += (end - start);
         free(data);
     }
+
+    closedir(dir);
+
+
+    // print the analysis results by decade
+    printf("Market Summary by Decade:\n");
+    printf("------------------------------------------------------------\n");
+
+    int first_decade = (global_min_year / 10) * 10;
+    int last_decade  = 2010;  // آخر فترة: 2010–2020
+
+    for (int decade_start = first_decade; decade_start <= last_decade; decade_start += 10) {
+        int idx = (decade_start - MIN_YEAR_GLOBAL) / 10;
+        if (idx < 0 || idx >= MAX_DECADES)
+            continue;
+
+        long rows = count_rows_decade[idx];
+        long rets = count_ret_decade[idx];
+
+        if (rows == 0 && rets == 0)
+            continue; 
+
+        double mean_price = 0.0;
+        double vol = 0.0;
+        double mean_r = 0.0;
+        double annual_r = 0.0;
+
+        if (rows > 0) {
+            mean_price = sum_avg_decade[idx] / (double)rows;
+        }
+
+        if (rets > 0) {
+            mean_r  = sum_ret_decade[idx]    / (double)rets;  // daily average
+            double mean_r2 = sum_ret_sq_decade[idx] / (double)rets;
+            double var = mean_r2 - mean_r * mean_r;
+            if (var < 0.0) var = 0.0;
+            vol = sqrt(var);
+
+                  annual_r = mean_r * 252.0; // approximate annualization
+
+        }
+
+        int decade_end = (decade_start == 2010) ? 2020 : (decade_start + 9);
+
+        printf("Decade %d-%d:\n", decade_start, decade_end);
+        printf("  Rows used:             %ld\n", rows);
+        printf("  Mean market price:     %.4f\n", mean_price);
+        printf("  Market volatility:     %.4f (%.4f%%)\n",
+               vol, vol * 100.0);
+
+        if (rets > 0) {
+            printf("  Mean daily return:     %.6f (%.4f%%)\n",
+                   mean_r, mean_r * 100.0);
+            printf("  Approx annual return:  %.6f (%.4f%%)\n\n",
+                   annual_r, annual_r * 100.0);
+        } else {
+            printf("  Mean daily return:     N/A\n");
+            printf("  Approx annual return:  N/A\n\n");
+        }
+    }
+
+    printf("Execution time (serial): %.6f seconds\n", total_time_exe);
 
     return 0;
 }
